@@ -2,48 +2,34 @@ version: '3.8'
 
 services:
   auth:
-    build: 
-      context: ./auth_service
-      dockerfile: ../Dockerfile
-    container_name: auth_service
+    build: ./auth_service
     ports:
       - "8000:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY:-supersecret}
-    networks:
-      - api_net
     restart: unless-stopped
 
   user:
-    build:
-      context: ./user_service
-      dockerfile: ../Dockerfile
-    container_name: user_service
+    build: ./user_service
     ports:
-      - "8001:8000"
+      - "8001:8000"  # внутри контейнера всегда 8000
     environment:
       - SECRET_KEY=${SECRET_KEY:-supersecret}
-    networks:
-      - api_net
+      - USER_SERVICE_URL=http://user:8000
     depends_on:
       - auth
     restart: unless-stopped
 
   order:
-    build:
-      context: ./order_service
-      dockerfile: ../Dockerfile
-    container_name: order_service
+    build: ./order_service
     ports:
       - "8002:8000"
     environment:
       - USER_SERVICE_URL=http://user:8000
-    networks:
-      - api_net
     depends_on:
       - user
     restart: unless-stopped
 
 networks:
-  api_net:
+  default:
     driver: bridge
