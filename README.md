@@ -14,3 +14,9 @@ start_services.py — НЕ для запуска, для дебага.
 ```bash
 venv\Scripts\activate
 python start_services.py
+```
+
+### Docker
+```bash
+docker-compose up --build
+```
