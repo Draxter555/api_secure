@@ -3,8 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Копируем зависимости сначала — чтобы кэшировался слой установки
-COPY ./requirements.txt .
-RUN pip install --no-cache-dir -r ./requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем код сервиса
 COPY . .
