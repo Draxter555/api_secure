@@ -12,7 +12,5 @@ start_services.py — НЕ для запуска, для дебага.
 ### Локально (для разработки)
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+venv\Scripts\activate
 python start_services.py
