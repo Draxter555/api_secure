@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-import requests
 
 app = FastAPI()
 
@@ -8,16 +7,10 @@ orders = {
     2: {"id": 2, "user_id": 2, "product": "Phone"}
 }
 
+@app.get("/orders")
+def get_orders():
+    return orders
+
 @app.get("/orders/{order_id}")
 def get_order(order_id: int):
-
-    order = orders.get(order_id)
-
-    user = requests.get(
-        f"http://localhost:8001/users/{order['user_id']}"
-    ).json()
-
-    return {
-        "order": order,
-        "user": user
-    }
+    return orders.get(order_id)
