@@ -52,7 +52,9 @@ def init_users(db: Session):
     ]
     
     for u in users_data:
-        hashed = pwd_context.hash(u["password"])
+        # bcrypt имеет лимит 72 байта на пароль — обрезаем на всякий случай
+        pwd = u["password"][:72]
+        hashed = pwd_context.hash(pwd)
         db.add(UserDB(username=u["username"], hashed_password=hashed, role=u["role"]))
     
     db.commit()
@@ -63,9 +65,7 @@ security = HTTPBearer(auto_error=False)
 
 @app.on_event("startup")
 def startup_event():
-    # Сначала создаём таблицы, если их нет
-    Base.metadata.create_all(bind=engine)
-    # Потом инициализируем данные
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     db = SessionLocal()
     init_users(db)
     db.close()

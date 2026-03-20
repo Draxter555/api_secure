@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import requests
 from typing import Optional
@@ -22,7 +22,7 @@ Base = declarative_base()
 class OrderDB(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer)  # Убрали ForeignKey для простоты инициализации
+    user_id = Column(Integer)
     product = Column(String)
     status = Column(String, default="new")
 
@@ -39,10 +39,10 @@ security = HTTPBearer(auto_error=False)
 
 @app.on_event("startup")
 def startup_event():
-    # Сначала создаём таблицы
-    Base.metadata.create_all(bind=engine)
+    # ИСПРАВЛЕНИЕ: checkfirst=True
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     
-    # Потом инициализируем тестовые данные
+    # Инициализация тестовых данных
     db = SessionLocal()
     try:
         if db.query(OrderDB).count() == 0:
@@ -52,7 +52,6 @@ def startup_event():
             ])
             db.commit()
     except Exception:
-        # Если таблица users ещё не готова — не критично для демо
         db.rollback()
     finally:
         db.close()

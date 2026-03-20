@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from typing import Optional
 import os
@@ -40,8 +40,8 @@ security = HTTPBearer(auto_error=False)
 
 @app.on_event("startup")
 def startup_event():
-    # Создаём таблицы при старте
-    Base.metadata.create_all(bind=engine)
+    # ИСПРАВЛЕНИЕ: checkfirst=True
+    Base.metadata.create_all(bind=engine, checkfirst=True)
 
 def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
@@ -72,7 +72,6 @@ def get_user(user_id: int, current_user: dict = Depends(get_current_user), db: S
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Не возвращаем хеш пароля
     return {
         "id": user.id,
         "name": user.username,
