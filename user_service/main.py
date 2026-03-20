@@ -1,22 +1,52 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from typing import Optional
+import os
 
-SECRET_KEY = "supersecret"
+# --- Конфигурация ---
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
+# --- База данных ---
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- Модели ---
+class UserDB(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    role = Column(String, default="user")
+    is_active = Column(Boolean, default=True)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- Приложение ---
 app = FastAPI()
 security = HTTPBearer(auto_error=False)
 
-users = {
-    1: {"id": 1, "name": "Ivan", "role": "admin"},
-    2: {"id": 2, "name": "Anna", "role": "user"}
-}
+@app.on_event("startup")
+def startup_event():
+    # Создаём таблицы при старте
+    Base.metadata.create_all(bind=engine)
 
 def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    x_user_id: Optional[int] = Header(None)  # для внутренних вызовов
+    x_user_id: Optional[int] = Header(None)
 ) -> dict:
-    """Получает пользователя из токена или из заголовка (для сервис-сервис)"""
     if creds and creds.credentials:
         try:
             payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=["HS256"])
@@ -26,29 +56,25 @@ def get_current_user(
             return {"id": uid, "role": payload.get("role", "user")}
         except JWTError:
             raise HTTPException(status_code=401, detail="Token decode failed")
-    # Fallback для внутренних запросов (если сервис доверяет источнику)
-    if x_user_id and x_user_id in users:
-        return {"id": x_user_id, "role": users[x_user_id]["role"]}
+    
+    if x_user_id:
+        return {"id": x_user_id, "role": "service"}
+        
     raise HTTPException(status_code=401, detail="Unauthorized")
 
-def require_role(required: str):
-    """Декоратор-проверка роли"""
-    def checker(user: dict = Depends(get_current_user)):
-        if user["role"] != required and required != "any":
-            raise HTTPException(status_code=403, detail="Access denied")
-        return user
-    return checker
-
 @app.get("/users/{user_id}")
-def get_user(
-    user_id: int,
-    current_user: dict = Depends(get_current_user)
-):
-    # Пользователь может смотреть только свой профиль, админ — любой
+def get_user(user_id: int, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user["role"] != "admin" and current_user["id"] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    data = users.get(user_id)
-    if not data:
+    user = db.query(UserDB).filter(UserDB.id == user_id).first()
+    
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return data
+    
+    # Не возвращаем хеш пароля
+    return {
+        "id": user.id,
+        "name": user.username,
+        "role": user.role
+    }

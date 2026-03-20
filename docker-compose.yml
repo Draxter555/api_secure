@@ -1,15 +1,33 @@
-version: '3.8'
-
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: secure_db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-1231}
+      - POSTGRES_DB=${POSTGRES_DB:-api_secure_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   auth:
-    # Собираем образ из текущей папки (где лежит новый общий Dockerfile)
     build: . 
     ports:
       - "8000:8000"
     environment:
-      - SECRET_KEY=${SECRET_KEY:-supersecret}
-    # Переопределяем команду запуска: ищем main.py внутри папки auth_service
+      - SECRET_KEY=${SECRET_KEY:-danil_kolbasenko}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-1231}@db:5432/${POSTGRES_DB:-api_secure_db}
     command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
   user:
@@ -17,11 +35,14 @@ services:
     ports:
       - "8001:8000"
     environment:
-      - SECRET_KEY=${SECRET_KEY:-supersecret}
+      - SECRET_KEY=${SECRET_KEY:-danil_kolbasenko}
       - USER_SERVICE_URL=http://user:8000
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-1231}@db:5432/${POSTGRES_DB:-api_secure_db}
     depends_on:
-      - auth
-    # Запускаем main.py из папки user_service
+      auth:
+        condition: service_started
+      db:
+        condition: service_healthy
     command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
@@ -31,12 +52,18 @@ services:
       - "8002:8000"
     environment:
       - USER_SERVICE_URL=http://user:8000
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-1231}@db:5432/${POSTGRES_DB:-api_secure_db}
     depends_on:
-      - user
-    # Запускаем main.py из папки order_service
+      user:
+        condition: service_started
+      db:
+        condition: service_healthy
     command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
 networks:
   default:
     driver: bridge
+
+volumes:
+  pgdata:
