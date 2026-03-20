@@ -2,32 +2,39 @@ version: '3.8'
 
 services:
   auth:
-    build: ./auth_service
+    # Собираем образ из текущей папки (где лежит новый общий Dockerfile)
+    build: . 
     ports:
       - "8000:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY:-supersecret}
+    # Переопределяем команду запуска: ищем main.py внутри папки auth_service
+    command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
   user:
-    build: ./user_service
+    build: .
     ports:
-      - "8001:8000"  # внутри контейнера всегда 8000
+      - "8001:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY:-supersecret}
       - USER_SERVICE_URL=http://user:8000
     depends_on:
       - auth
+    # Запускаем main.py из папки user_service
+    command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
   order:
-    build: ./order_service
+    build: .
     ports:
       - "8002:8000"
     environment:
       - USER_SERVICE_URL=http://user:8000
     depends_on:
       - user
+    # Запускаем main.py из папки order_service
+    command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
 networks:
