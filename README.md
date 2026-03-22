@@ -1,4 +1,5 @@
 # ВЕРСИЯ БЕЗ УЯЗВИМОСТЕЙ
+
 ## Структура
 
 - `auth_service/` — аутентификация, выдача JWT
@@ -12,11 +13,7 @@ start_services.py — НЕ для запуска, для дебага.
 ### Локально (для разработки)
 
 ```bash
-venv\Scripts\activate
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 python start_services.py
-```
-
-### Docker
-```bash
-docker-compose up --build
-```
