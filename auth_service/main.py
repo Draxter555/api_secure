@@ -1,77 +1,99 @@
-from fastapi import FastAPI, HTTPException, Header, Request
-from jose import jwt
-from datetime import datetime, timedelta
-from typing import Optional
-import time
-import os
-import uuid
-import logging
-from passlib.context import CryptContext
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy import select
+from jose import jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+import os
+import logging
+import time
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
+# --- Настройки ---
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+DB_USER = os.getenv("POSTGRES_USER")
+DB_PASS = os.getenv("POSTGRES_PASSWORD")
+DB_NAME = os.getenv("POSTGRES_DB")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
-logging.basicConfig(level=logging.INFO)
+DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
+# --- Модель пользователя для auth ---
+class AuthUser(Base):
+    __tablename__ = "auth_users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    password = Column(String, nullable=False)
+    role = Column(String, nullable=False)
+
+# --- FastAPI ---
 app = FastAPI()
+security = HTTPBearer(auto_error=False)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-users = {
-    "ivan": {"password": pwd_context.hash("1234"), "id": 1, "role": "admin"},
-    "anna": {"password": pwd_context.hash("1234"), "id": 2, "role": "user"}
-}
-
-login_attempts: dict[str, list[float]] = {}
-
-def check_rate_limit(ip: Optional[str], limit: int = 5, window: int = 60) -> bool:
-    if not ip:
-        return True
-    now = time.time()
-    login_attempts.setdefault(ip, [])
-    login_attempts[ip] = [t for t in login_attempts[ip] if now - t < window]
-    if len(login_attempts[ip]) >= limit:
-        return False
-    login_attempts[ip].append(now)
-    return True
+# --- Логирование и Rate Limiting ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+request_counts: dict[str, list[float]] = {}
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", 10))
+WINDOW_SIZE = int(os.getenv("RATE_WINDOW", 60))
 
 @app.middleware("http")
-async def security_headers(request: Request, call_next):
+async def rate_limit_and_logging(request: Request, call_next):
+    ip = request.client.host
+    now = time.time()
+    request_counts.setdefault(ip, [])
+    request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
+    if len(request_counts[ip]) >= RATE_LIMIT:
+        logging.warning(f"Rate limit exceeded for IP {ip} on path {request.url.path}")
+        raise HTTPException(status_code=429, detail="Too many requests")
+    request_counts[ip].append(now)
+    logging.info(f"Incoming request {request.method} {request.url.path} from {ip}")
     response = await call_next(request)
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-Content-Type-Options"] = "nosniff"
+    logging.info(f"Response {response.status_code} to {ip} for {request.url.path}")
     return response
 
+# --- CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://yourdomain.com"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+# --- Password Hashing ---
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# --- DB Dependency ---
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- Endpoints ---
 @app.post("/login")
-def login(username: str, password: str, x_forwarded_for: Optional[str] = Header(None)):
-    if not check_rate_limit(x_forwarded_for):
-        raise HTTPException(status_code=429, detail="Too many attempts")
-
-    user = users.get(username)
-    if not user or not pwd_context.verify(password, user["password"]):
-        logging.warning(f"Failed login attempt for {username}")
+def login(username: str, password: str, db: Session = Depends(get_db)):
+    stmt = select(AuthUser).where(AuthUser.username == username)
+    user = db.execute(stmt).scalar_one_or_none()
+    if not user or not pwd_context.verify(password, user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
+    
     token = jwt.encode(
         {
-            "user_id": user["id"],
-            "role": user["role"],
-            "exp": datetime.utcnow() + timedelta(minutes=30),
-            "jti": str(uuid.uuid4()),
+            "user_id": user.id,
+            "role": user.role,
+            "exp": datetime.utcnow() + timedelta(hours=1)
         },
         SECRET_KEY,
-        algorithm=ALGORITHM
+        algorithm="HS256"
     )
-
-    logging.info(f"User {username} logged in")
-
-    return {"access_token": token}
+    return {"access_token": token, "token_type": "bearer"}
