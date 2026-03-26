@@ -1,63 +1,97 @@
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import requests
-from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt, JWTError
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, select
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 import os
+import logging
+import time
 
+# --- Настройки ---
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+DB_USER = os.getenv("POSTGRES_USER")
+DB_PASS = os.getenv("POSTGRES_PASSWORD")
+DB_NAME = os.getenv("POSTGRES_DB")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
+
+DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
+
+engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- Модели ---
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    product = Column(String, nullable=False)
+
+# --- FastAPI ---
 app = FastAPI()
 security = HTTPBearer(auto_error=False)
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
 
-orders = {
-    1: {"id": 1, "user_id": 1, "product": "Laptop"},
-    2: {"id": 2, "user_id": 2, "product": "Phone"}
-}
+# --- Логирование и Rate Limiting ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+request_counts: dict[str, list[float]] = {}
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", 10))
+WINDOW_SIZE = int(os.getenv("RATE_WINDOW", 60))
 
-USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
+@app.middleware("http")
+async def rate_limit_and_logging(request: Request, call_next):
+    ip = request.client.host
+    now = time.time()
+    request_counts.setdefault(ip, [])
+    request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
+    if len(request_counts[ip]) >= RATE_LIMIT:
+        logging.warning(f"Rate limit exceeded for IP {ip} on path {request.url.path}")
+        raise HTTPException(status_code=429, detail="Too many requests")
+    request_counts[ip].append(now)
+    logging.info(f"Incoming request {request.method} {request.url.path} from {ip}")
+    response = await call_next(request)
+    logging.info(f"Response {response.status_code} to {ip} for {request.url.path}")
+    return response
 
-def get_token(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[str]:
-    return creds.credentials if creds else None
+# --- CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://yourdomain.com"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
+# --- DB Dependency ---
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- Auth ---
+def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
+    if not creds or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=["HS256"])
+        return {"id": payload.get("user_id"), "role": payload.get("role", "user")}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# --- Endpoints ---
 @app.get("/orders/{order_id}")
-def get_order(
-    order_id: int,
-    token: Optional[str] = Depends(get_token)
-):
-    order = orders.get(order_id)
+def get_order(order_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    stmt = select(Order).where(Order.id == order_id)
+    order = db.execute(stmt).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    # Проверка BOLA
+    if current_user["role"] != "admin" and current_user["id"] != order.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     
-    try:
-        # Запрашиваем данные пользователя с теми же правами
-        resp = requests.get(
-            f"{USER_SERVICE_URL}/users/{order['user_id']}",
-            headers=headers,
-            timeout=5
-        )
-        resp.raise_for_status()
-        user = resp.json()
-    except requests.exceptions.RequestException:
-        # Если пользователь-сервис недоступен — не раскрываем детали
-        raise HTTPException(status_code=503, detail="User service unavailable")
-
-    # Проверка BOLA: обычный пользователь может смотреть только свои заказы
-    if token:
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-            current_user_id = payload.get("user_id")
-            if current_user_id != order["user_id"] and payload.get("role") != "admin":
-                raise HTTPException(status_code=403, detail="Access denied")
-        except JWTError:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    
-    # Возвращаем только безопасные поля
-    return {
-        "order_id": order["id"],
-        "product": order["product"],
-        "user_name": user.get("name")
-    }
+    return {"order_id": order.id, "product": order.product, "user_id": order.user_id}
