@@ -1,17 +1,22 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from jose import jwt
 from datetime import datetime, timedelta
 from typing import Optional
 import time
+import os
+from passlib.context import CryptContext
 
-SECRET_KEY = "supersecret"  # в продакшене — через env
+# Секрет ключ через env
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
 
 app = FastAPI()
 
-# Хранилище пользователей с ролями
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Хранилище пользователей с ролями и хешированными паролями
 users = {
-    "ivan": {"password": "1234", "id": 1, "role": "admin"},
-    "anna": {"password": "1234", "id": 2, "role": "user"}
+    "ivan": {"password": pwd_context.hash("1234"), "id": 1, "role": "admin"},
+    "anna": {"password": pwd_context.hash("1234"), "id": 2, "role": "user"}
 }
 
 # Простейший rate limit: не больше 5 попыток входа в минуту с одного IP
@@ -29,6 +34,14 @@ def check_rate_limit(ip: Optional[str], limit: int = 5, window: int = 60) -> boo
     login_attempts[ip].append(now)
     return True
 
+# Middleware для rate limit на все endpoint'ы (при желании расширяем)
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    ip = request.client.host
+    if not check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+    return await call_next(request)
+
 @app.post("/login")
 def login(username: str, password: str, x_forwarded_for: Optional[str] = Header(None)):
     # Проверяем лимит запросов
@@ -36,7 +49,7 @@ def login(username: str, password: str, x_forwarded_for: Optional[str] = Header(
         raise HTTPException(status_code=429, detail="Too many attempts")
     
     user = users.get(username)
-    if not user or user["password"] != password:
+    if not user or not pwd_context.verify(password, user["password"]):
         # Не уточняем, что именно не так — чтобы не помогать злоумышленнику
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
