@@ -42,6 +42,7 @@ Base.metadata.create_all(bind=engine)
 # --- API9: отключаем docs в продакшне ---
 ENV = os.getenv("APP_ENV", "development")
 app = FastAPI(
+    root_path="/auth",
     docs_url="/docs" if ENV == "development" else None,
     redoc_url="/redoc" if ENV == "development" else None,
     openapi_url="/openapi.json" if ENV == "development" else None,

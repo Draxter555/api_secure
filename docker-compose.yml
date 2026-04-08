@@ -27,7 +27,7 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000 --root-path /auth
+    command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
         condition: service_healthy
@@ -47,7 +47,7 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000 --root-path /user
+    command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
         condition: service_healthy
@@ -68,7 +68,7 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000 --root-path /order
+    command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
         condition: service_healthy
@@ -96,9 +96,9 @@ services:
       timeout: 5s
       retries: 10
 
-    # потом удалить !!!!!!!!!!!!!!!
-    ports:
-      - "5432:5432"
+  # потом удалить !!!!!!!!!!!!!!!
+  # ports:
+  #   - "5432:5432"
 
 volumes:
   postgres_data:

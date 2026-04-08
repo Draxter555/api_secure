@@ -5,6 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv(".env")
 
+print("DB:", os.getenv("POSTGRES_DB"))
+print("USER:", os.getenv("POSTGRES_USER"))
+print("PASS:", os.getenv("POSTGRES_PASSWORD"))
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 conn = psycopg2.connect(
