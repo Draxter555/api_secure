@@ -1,23 +1,25 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt, JWTError
 from typing import Optional
+from sqlalchemy import create_engine, select, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import os
-from fastapi.middleware.cors import CORSMiddleware
 import logging
 import time
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
-from sqlalchemy import Column, Integer, String
 
 # --- Настройка ---
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY environment variable is not set")
+
 DB_USER = os.getenv("POSTGRES_USER")
 DB_PASS = os.getenv("POSTGRES_PASSWORD")
 DB_NAME = os.getenv("POSTGRES_DB")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
-DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
+DB_SSLMODE = os.getenv("DB_SSLMODE", "disable")
 
 DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
 
@@ -25,24 +27,39 @@ engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- Модель пользователя ---
+# --- Модель ---
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     role = Column(String, nullable=False)
 
-# --- Инициализация FastAPI ---
+Base.metadata.create_all(bind=engine)
+
+# --- FastAPI ---
 app = FastAPI()
 security = HTTPBearer(auto_error=False)
 
-# --- Логирование ---
+# --- Логирование и Rate Limiting ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# --- Rate Limiting ---
 request_counts: dict[str, list[float]] = {}
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", 10))
 WINDOW_SIZE = int(os.getenv("RATE_WINDOW", 60))
+
+@app.middleware("http")
+async def rate_limit_and_logging(request: Request, call_next):
+    ip = request.client.host
+    now = time.time()
+    request_counts.setdefault(ip, [])
+    request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
+    if len(request_counts[ip]) >= RATE_LIMIT:
+        logging.warning(f"Rate limit exceeded for IP {ip}")
+        raise HTTPException(status_code=429, detail="Too many requests")
+    request_counts[ip].append(now)
+    logging.info(f"{request.method} {request.url.path} from {ip}")
+    response = await call_next(request)
+    logging.info(f"Response {response.status_code} to {ip}")
+    return response
 
 # --- CORS ---
 app.add_middleware(
@@ -52,21 +69,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
-
-@app.middleware("http")
-async def rate_limit_and_logging(request: Request, call_next):
-    ip = request.client.host
-    now = time.time()
-    request_counts.setdefault(ip, [])
-    request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
-    if len(request_counts[ip]) >= RATE_LIMIT:
-        logging.warning(f"Rate limit exceeded for IP {ip} on path {request.url.path}")
-        raise HTTPException(status_code=429, detail="Too many requests")
-    request_counts[ip].append(now)
-    logging.info(f"Incoming request {request.method} {request.url.path} from {ip}")
-    response = await call_next(request)
-    logging.info(f"Response {response.status_code} to {ip} for {request.url.path}")
-    return response
 
 # --- DB Dependency ---
 def get_db():
@@ -95,7 +97,12 @@ def require_role(required: str):
 
 # --- Endpoints ---
 @app.get("/users/{user_id}")
-def get_user(user_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    # API1: BOLA — пользователь может смотреть только себя, admin — всех
     if current_user["role"] != "admin" and current_user["id"] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -104,5 +111,5 @@ def get_user(user_id: int, db: Session = Depends(get_db), current_user: dict = D
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Возвращаем только безопасные поля
+    # API3: возвращаем только безопасные поля, без role и внутренних данных
     return {"id": result.id, "name": result.name}
