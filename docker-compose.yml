@@ -27,11 +27,13 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000 --root-path /auth
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - api_net
+    restart: on-failure
 
   user:
     build: .
@@ -45,11 +47,13 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000 --root-path /user
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - api_net
+    restart: on-failure
 
   order:
     build: .
@@ -64,12 +68,15 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
-    command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000 --root-path /order
     depends_on:
-      - user
-      - db
+      db:
+        condition: service_healthy
+      user:
+        condition: service_started
     networks:
       - api_net
+    restart: on-failure
 
   db:
     image: postgres:15
@@ -83,6 +90,15 @@ services:
       - "5432"
     networks:
       - api_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    # потом удалить !!!!!!!!!!!!!!!
+    ports:
+      - "5432:5432"
 
 volumes:
   postgres_data:

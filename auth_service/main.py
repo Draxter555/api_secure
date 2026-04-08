@@ -39,8 +39,14 @@ class AuthUser(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- FastAPI ---
-app = FastAPI()
+# --- API9: отключаем docs в продакшне ---
+ENV = os.getenv("APP_ENV", "development")
+app = FastAPI(
+    docs_url="/docs" if ENV == "development" else None,
+    redoc_url="/redoc" if ENV == "development" else None,
+    openapi_url="/openapi.json" if ENV == "development" else None,
+)
+
 security = HTTPBearer(auto_error=False)
 
 # --- Логирование и Rate Limiting ---
@@ -84,17 +90,16 @@ def get_db():
     finally:
         db.close()
 
-# --- Pydantic схема (API2: credentials в body, не в query) ---
+# --- Pydantic схема ---
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-# --- Endpoints ---
-@app.post("/login")
+# --- API9: версионирование ---
+@app.post("/v1/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     stmt = select(AuthUser).where(AuthUser.username == data.username)
     user = db.execute(stmt).scalar_one_or_none()
-    # Одинаковое сообщение для несуществующего пользователя и неверного пароля
     if not user or not pwd_context.verify(data.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 

@@ -36,8 +36,14 @@ class User(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- FastAPI ---
-app = FastAPI()
+# --- API9: отключаем docs в продакшне ---
+ENV = os.getenv("APP_ENV", "development")
+app = FastAPI(
+    docs_url="/docs" if ENV == "development" else None,
+    redoc_url="/redoc" if ENV == "development" else None,
+    openapi_url="/openapi.json" if ENV == "development" else None,
+)
+
 security = HTTPBearer(auto_error=False)
 
 # --- Логирование и Rate Limiting ---
@@ -95,14 +101,13 @@ def require_role(required: str):
         return user
     return checker
 
-# --- Endpoints ---
-@app.get("/users/{user_id}")
+# --- API9: версионирование ---
+@app.get("/v1/users/{user_id}")
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    # API1: BOLA — пользователь может смотреть только себя, admin — всех
     if current_user["role"] != "admin" and current_user["id"] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -111,5 +116,4 @@ def get_user(
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # API3: возвращаем только безопасные поля, без role и внутренних данных
     return {"id": result.id, "name": result.name}

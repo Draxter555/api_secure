@@ -22,7 +22,6 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_SSLMODE = os.getenv("DB_SSLMODE", "disable")
 
-# API7/API10: URL внешнего сервиса только из env, захардкоженный fallback запрещён
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL")
 if not USER_SERVICE_URL:
     raise RuntimeError("USER_SERVICE_URL environment variable is not set")
@@ -42,8 +41,14 @@ class Order(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- FastAPI ---
-app = FastAPI()
+# --- API9: отключаем docs в продакшне ---
+ENV = os.getenv("APP_ENV", "development")
+app = FastAPI(
+    docs_url="/docs" if ENV == "development" else None,
+    redoc_url="/redoc" if ENV == "development" else None,
+    openapi_url="/openapi.json" if ENV == "development" else None,
+)
+
 security = HTTPBearer(auto_error=False)
 
 # --- Логирование и Rate Limiting ---
@@ -94,12 +99,12 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# --- Pydantic схема для создания заказа ---
+# --- Pydantic схема ---
 class OrderCreate(BaseModel):
     product: str
 
-# --- Endpoints ---
-@app.get("/orders/{order_id}")
+# --- API9: версионирование ---
+@app.get("/v1/orders/{order_id}")
 def get_order(
     order_id: int,
     db: Session = Depends(get_db),
@@ -110,24 +115,21 @@ def get_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # API1: BOLA
     if current_user["role"] != "admin" and current_user["id"] != order.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
     return {"order_id": order.id, "product": order.product, "user_id": order.user_id}
 
 
-@app.post("/orders")
+@app.post("/v1/orders")
 def create_order(
     data: OrderCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    # API10: запрос к user_service с таймаутом и проверкой ответа
     try:
         resp = http_requests.get(
-            f"{USER_SERVICE_URL}/users/{current_user['id']}",
-            headers={"Authorization": f"Bearer __internal__"},
+            f"{USER_SERVICE_URL}/v1/users/{current_user['id']}",
             timeout=3
         )
         if resp.status_code != 200:
