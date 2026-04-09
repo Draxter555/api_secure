@@ -1,14 +1,18 @@
 """
 Автоматические тесты безопасности OWASP API Top 10
-Запуск: pytest test_security.py -v -k "not API4 and not API6"
-        pytest test_security.py -v -k " API4 or API6"
-
-Требования: docker-compose up --build + seed.py выполнен
+Запуск всех тестов кроме rate limiting: pytest test_security.py -v -k "not API4 and not API6"
+Запуск rate limiting тестов отдельно:   pytest test_security.py -v -k "API4 or API6"
+Запуск всех сразу (долго ~10 мин):      pytest test_security.py -v
 """
 
-import time 
+import os
+import time
 import pytest
 import requests
+from jose import jwt as jose_jwt
+from dotenv import load_dotenv
+
+load_dotenv(".env")
 
 BASE = "http://localhost"
 AUTH_URL = f"{BASE}/auth/v1/login"
@@ -32,43 +36,90 @@ def auth_header(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def get_token_with_retry(username: str, password: str) -> str:
+    """Получить токен с повторными попытками при rate limit."""
+    for attempt in range(5):
+        token = get_token(username, password)
+        if token is not None:
+            return token
+        print(f"[{username}] Попытка {attempt+1}: ждём сброса rate limit...")
+        time.sleep(65)
+    assert False, f"Не удалось получить токен для {username} после 5 попыток."
+
+
+def load_test_users() -> dict:
+    """
+    Читает пользователей из TEST_USERS в .env.
+    Формат: username:password:role,username:password:role
+    Возвращает: {"ivan": {"password": "secret", "role": "user"}, ...}
+    """
+    raw = os.getenv("TEST_USERS", "")
+    users = {}
+    for entry in raw.split(","):
+        parts = entry.strip().split(":")
+        if len(parts) == 3:
+            username, password, role = parts
+            users[username] = {"password": password, "role": role}
+    return users
+
+
+TEST_USERS = load_test_users()
+
+
+def get_token_by_role(tokens: dict, role: str) -> str:
+    """Получить токен первого пользователя с нужной ролью."""
+    for username, data in tokens.items():
+        if data["role"] == role:
+            return data["token"]
+    assert False, f"Нет пользователя с ролью '{role}' в TEST_USERS"
+
+
+def get_token_by_role_exclude(tokens: dict, role: str, exclude_token: str) -> str:
+    """Получить токен пользователя с ролью, но не того же что exclude_token."""
+    for username, data in tokens.items():
+        if data["role"] == role and data["token"] != exclude_token:
+            return data["token"]
+    assert False, f"Нет второго пользователя с ролью '{role}'"
+
+
+def get_user_id_from_token(token: str) -> int:
+    """Достать user_id из JWT токена без проверки подписи."""
+    claims = jose_jwt.get_unverified_claims(token)
+    return claims.get("user_id")
+
+
 # ──────────────────────────────────────────────
 # ФИКСТУРЫ
 # ──────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def ivan_token():
-    token = get_token("ivan", "secret")
-    assert token is not None, "Не удалось получить токен для ivan. Убедись что seed.py выполнен."
-    return token
+def tokens() -> dict:
+    """
+    Единый словарь со всеми токенами всех пользователей из .env.
+    Добавляешь пользователя в TEST_USERS в .env — он автоматически появляется здесь.
+    Структура: {"ivan": {"token": "...", "role": "user"}, ...}
+    """
+    result = {}
+    for username, data in TEST_USERS.items():
+        result[username] = {
+            "token": get_token_with_retry(username, data["password"]),
+            "role": data["role"]
+        }
+    return result
 
 
 @pytest.fixture(scope="session")
-def anna_token():
-    token = get_token("anna", "secret")
-    assert token is not None, "Не удалось получить токен для anna."
-    return token
-
-
-@pytest.fixture(scope="session")
-def admin_token():
-    token = get_token("admin", "secret")
-    assert token is not None, "Не удалось получить токен для admin."
-    return token
-
-
-@pytest.fixture(scope="session")
-def ivan_order_id(ivan_token):
-    """Создать тестовый заказ от имени ivan и вернуть его id."""
+def ivan_order_id(tokens) -> int:
+    """Создать тестовый заказ от имени первого user и вернуть его order_id."""
+    user_token = get_token_by_role(tokens, "user")
     resp = requests.post(
         ORDER_URL,
         json={"product": "test_product"},
-        headers=auth_header(ivan_token)
+        headers=auth_header(user_token)
     )
-    # Если user сервис не нашёл ивана — заказ не создастся (нормально для изолированного теста)
     if resp.status_code == 200:
         return resp.json().get("order_id")
-    pytest.skip("Не удалось создать заказ для ivan — пропускаем тесты на заказах")
+    pytest.skip("Не удалось создать заказ — пропускаем тесты на заказах")
 
 
 # ──────────────────────────────────────────────
@@ -77,41 +128,57 @@ def ivan_order_id(ivan_token):
 
 class TestAPI1_BOLA:
 
-    def test_user_cannot_access_other_user(self, ivan_token):
-        """Ivan (id=1) не должен видеть данные Anna (id=2)."""
-        resp = requests.get(f"{USER_URL}/2", headers=auth_header(ivan_token))
+    def test_user_cannot_access_other_user(self, tokens):
+        """Пользователь не должен видеть данные другого пользователя."""
+        user_token = get_token_by_role(tokens, "user")
+        other_token = get_token_by_role_exclude(tokens, "user", user_token)
+        other_id = get_user_id_from_token(other_token)
+
+        resp = requests.get(f"{USER_URL}/{other_id}", headers=auth_header(user_token))
         assert resp.status_code == 403, (
             f"УЯЗВИМОСТЬ API1: пользователь получил доступ к чужим данным. "
             f"Статус: {resp.status_code}"
         )
 
-    def test_user_can_access_own_data(self, ivan_token):
-        """Ivan должен видеть свои данные."""
-        resp = requests.get(f"{USER_URL}/1", headers=auth_header(ivan_token))
+    def test_user_can_access_own_data(self, tokens):
+        """Пользователь должен видеть свои данные."""
+        user_token = get_token_by_role(tokens, "user")
+        user_id = get_user_id_from_token(user_token)
+
+        resp = requests.get(f"{USER_URL}/{user_id}", headers=auth_header(user_token))
         assert resp.status_code == 200, (
             f"Ошибка: пользователь не может получить свои данные. "
             f"Статус: {resp.status_code}"
         )
 
-    def test_admin_can_access_any_user(self, admin_token):
+    def test_admin_can_access_any_user(self, tokens):
         """Admin должен видеть данные любого пользователя."""
-        resp = requests.get(f"{USER_URL}/1", headers=auth_header(admin_token))
-        assert resp.status_code == 200, (
-            f"Ошибка: admin не может получить данные пользователя. "
-            f"Статус: {resp.status_code}"
-        )
+        admin_token = get_token_by_role(tokens, "admin")
 
-    def test_user_cannot_access_other_order(self, anna_token, ivan_order_id):
-        """Anna не должна видеть заказ Ivan."""
-        resp = requests.get(f"{ORDER_URL}/{ivan_order_id}", headers=auth_header(anna_token))
+        for username, data in tokens.items():
+            uid = get_user_id_from_token(data["token"])
+            resp = requests.get(f"{USER_URL}/{uid}", headers=auth_header(admin_token))
+            assert resp.status_code == 200, (
+                f"Ошибка: admin не может получить данные user_id={uid}. "
+                f"Статус: {resp.status_code}"
+            )
+
+    def test_user_cannot_access_other_order(self, tokens, ivan_order_id):
+        """Пользователь не должен видеть чужой заказ."""
+        user_token = get_token_by_role(tokens, "user")
+        other_token = get_token_by_role_exclude(tokens, "user", user_token)
+
+        resp = requests.get(f"{ORDER_URL}/{ivan_order_id}", headers=auth_header(other_token))
         assert resp.status_code == 403, (
             f"УЯЗВИМОСТЬ API1: пользователь получил доступ к чужому заказу. "
             f"Статус: {resp.status_code}"
         )
 
-    def test_owner_can_access_own_order(self, ivan_token, ivan_order_id):
-        """Ivan должен видеть свой заказ."""
-        resp = requests.get(f"{ORDER_URL}/{ivan_order_id}", headers=auth_header(ivan_token))
+    def test_owner_can_access_own_order(self, tokens, ivan_order_id):
+        """Владелец должен видеть свой заказ."""
+        user_token = get_token_by_role(tokens, "user")
+
+        resp = requests.get(f"{ORDER_URL}/{ivan_order_id}", headers=auth_header(user_token))
         assert resp.status_code == 200, (
             f"Ошибка: владелец не может получить свой заказ. "
             f"Статус: {resp.status_code}"
@@ -157,7 +224,7 @@ class TestAPI2_BrokenAuthentication:
         )
 
     def test_credentials_not_accepted_as_query_params(self):
-        """Credentials в query params должны отклоняться (только JSON body)."""
+        """Credentials в query params должны отклоняться."""
         resp = requests.post(f"{AUTH_URL}?username=ivan&password=secret")
         assert resp.status_code == 422, (
             f"УЯЗВИМОСТЬ API2: credentials принимаются через query params. "
@@ -184,45 +251,51 @@ class TestAPI2_BrokenAuthentication:
 
 class TestAPI3_ObjectPropertyAuth:
 
-    def test_response_does_not_contain_password(self, ivan_token):
+    def test_response_does_not_contain_password(self, tokens):
         """Ответ не должен содержать поле password."""
-        resp = requests.get(f"{USER_URL}/1", headers=auth_header(ivan_token))
+        user_token = get_token_by_role(tokens, "user")
+        user_id = get_user_id_from_token(user_token)
+
+        resp = requests.get(f"{USER_URL}/{user_id}", headers=auth_header(user_token))
         assert resp.status_code == 200
-        data = resp.json()
-        assert "password" not in data, (
-            f"УЯЗВИМОСТЬ API3: ответ содержит поле password: {data}"
+        assert "password" not in resp.json(), (
+            f"УЯЗВИМОСТЬ API3: ответ содержит поле password: {resp.json()}"
         )
 
-    def test_response_does_not_contain_role(self, ivan_token):
-        """Ответ не должен содержать поле role для обычного пользователя."""
-        resp = requests.get(f"{USER_URL}/1", headers=auth_header(ivan_token))
+    def test_response_does_not_contain_role(self, tokens):
+        """Ответ не должен содержать поле role."""
+        user_token = get_token_by_role(tokens, "user")
+        user_id = get_user_id_from_token(user_token)
+
+        resp = requests.get(f"{USER_URL}/{user_id}", headers=auth_header(user_token))
         assert resp.status_code == 200
-        data = resp.json()
-        assert "role" not in data, (
-            f"УЯЗВИМОСТЬ API3: ответ содержит поле role: {data}"
+        assert "role" not in resp.json(), (
+            f"УЯЗВИМОСТЬ API3: ответ содержит поле role: {resp.json()}"
         )
 
-    def test_response_contains_only_safe_fields(self, ivan_token):
+    def test_response_contains_only_safe_fields(self, tokens):
         """Ответ должен содержать только id и name."""
-        resp = requests.get(f"{USER_URL}/1", headers=auth_header(ivan_token))
+        user_token = get_token_by_role(tokens, "user")
+        user_id = get_user_id_from_token(user_token)
+
+        resp = requests.get(f"{USER_URL}/{user_id}", headers=auth_header(user_token))
         assert resp.status_code == 200
-        data = resp.json()
-        allowed_fields = {"id", "name"}
-        extra_fields = set(data.keys()) - allowed_fields
+        extra_fields = set(resp.json().keys()) - {"id", "name"}
         assert not extra_fields, (
             f"УЯЗВИМОСТЬ API3: ответ содержит лишние поля: {extra_fields}"
         )
 
-    def test_extra_fields_in_request_ignored(self, ivan_token):
-        """Лишние поля в запросе должны игнорироваться (не вызывать ошибку сервера)."""
+    def test_extra_fields_in_request_ignored(self, tokens):
+        """Лишние поля в запросе не должны вызывать ошибку сервера."""
+        user_token = get_token_by_role(tokens, "user")
+
         resp = requests.post(
             ORDER_URL,
             json={"product": "test", "user_id": 999, "admin": True, "extra_field": "hack"},
-            headers=auth_header(ivan_token)
+            headers=auth_header(user_token)
         )
-        # Не должно быть 500 — сервер не должен падать от лишних полей
         assert resp.status_code != 500, (
-            f"УЯЗВИМОСТЬ API3: лишние поля в запросе вызвали ошибку сервера."
+            "УЯЗВИМОСТЬ API3: лишние поля в запросе вызвали ошибку сервера."
         )
 
 
@@ -232,9 +305,14 @@ class TestAPI3_ObjectPropertyAuth:
 
 class TestAPI4_RateLimiting:
 
+    @classmethod
+    def setup_class(cls):
+        """Пауза перед классом чтобы сбросить rate limit."""
+        time.sleep(65)
+
     def setup_method(self):
-        """Пауза перед каждым тестом чтобы сбросить rate limit окно."""
-        time.sleep(65)  # ждём полный сброс окна (WINDOW_SIZE = 60 сек)
+        """Пауза перед каждым тестом."""
+        time.sleep(65)
 
     def test_rate_limit_triggers_after_limit(self):
         """После 10 запросов должен вернуться 429."""
@@ -245,7 +323,7 @@ class TestAPI4_RateLimiting:
                 json={"username": "nonexistent", "password": "wrong"}
             )
             status_codes.append(resp.status_code)
-            time.sleep(0.3)  # небольшая пауза между запросами
+            time.sleep(0.3)
 
         assert 429 in status_codes, (
             f"УЯЗВИМОСТЬ API4: rate limiting не сработал. "
@@ -267,32 +345,43 @@ class TestAPI4_RateLimiting:
             f"Ожидался статус 429, получен: {last_status}"
         )
 
+
 # ──────────────────────────────────────────────
 # API5 — Broken Function Level Authorization (RBAC)
 # ──────────────────────────────────────────────
 
 class TestAPI5_RBAC:
 
-    def test_regular_user_cannot_access_other_users_data(self, ivan_token):
-        """Обычный пользователь не может смотреть данные других (не admin-функция)."""
-        resp = requests.get(f"{USER_URL}/2", headers=auth_header(ivan_token))
+    @classmethod
+    def setup_class(cls):
+        time.sleep(65)
+
+    def test_regular_user_cannot_access_other_users_data(self, tokens):
+        """Обычный пользователь не может смотреть данные других."""
+        user_token = get_token_by_role(tokens, "user")
+        other_token = get_token_by_role_exclude(tokens, "user", user_token)
+        other_id = get_user_id_from_token(other_token)
+
+        resp = requests.get(f"{USER_URL}/{other_id}", headers=auth_header(user_token))
         assert resp.status_code == 403, (
             f"УЯЗВИМОСТЬ API5: обычный пользователь получил доступ к чужим данным. "
             f"Статус: {resp.status_code}"
         )
 
-    def test_admin_can_access_all_users(self, admin_token):
+    def test_admin_can_access_all_users(self, tokens):
         """Admin должен получать данные любого пользователя."""
-        for user_id in [1, 2, 3]:
-            resp = requests.get(f"{USER_URL}/{user_id}", headers=auth_header(admin_token))
+        admin_token = get_token_by_role(tokens, "admin")
+
+        for username, data in tokens.items():
+            uid = get_user_id_from_token(data["token"])
+            resp = requests.get(f"{USER_URL}/{uid}", headers=auth_header(admin_token))
             assert resp.status_code == 200, (
-                f"Ошибка: admin не может получить данные user_id={user_id}. "
+                f"Ошибка: admin не может получить данные user_id={uid}. "
                 f"Статус: {resp.status_code}"
             )
 
     def test_expired_token_rejected(self):
         """Истёкший токен должен отклоняться."""
-        # Токен с exp в прошлом, подписан правильным алгоритмом но истёк
         expired_token = (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
             "eyJ1c2VyX2lkIjoxLCJyb2xlIjoidXNlciIsImV4cCI6MTYwMDAwMDAwMH0."
@@ -310,8 +399,11 @@ class TestAPI5_RBAC:
 
 class TestAPI6_BusinessFlows:
 
+    @classmethod
+    def setup_class(cls):
+        time.sleep(65)
+
     def setup_method(self):
-        """Пауза перед каждым тестом чтобы сбросить rate limit окно."""
         time.sleep(65)
 
     def test_brute_force_login_blocked_by_rate_limit(self):
@@ -331,14 +423,15 @@ class TestAPI6_BusinessFlows:
             "УЯЗВИМОСТЬ API6: brute force на /login не блокируется."
         )
 
-    def test_mass_order_creation_blocked(self, ivan_token):
+    def test_mass_order_creation_blocked(self, tokens):
         """Массовое создание заказов должно блокироваться rate limiting."""
+        user_token = get_token_by_role(tokens, "user")
         blocked = False
         for _ in range(15):
             resp = requests.post(
                 ORDER_URL,
                 json={"product": "spam_product"},
-                headers=auth_header(ivan_token)
+                headers=auth_header(user_token)
             )
             time.sleep(0.3)
             if resp.status_code == 429:
@@ -356,8 +449,10 @@ class TestAPI6_BusinessFlows:
 
 class TestAPI7_SSRF:
 
-    def test_user_service_url_not_overridable_via_request(self, ivan_token):
+    def test_user_service_url_not_overridable_via_request(self, tokens):
         """Нельзя передать произвольный URL сервиса через тело запроса."""
+        user_token = get_token_by_role(tokens, "user")
+
         resp = requests.post(
             ORDER_URL,
             json={
@@ -365,9 +460,8 @@ class TestAPI7_SSRF:
                 "user_service_url": "http://evil.com/steal",
                 "callback": "http://attacker.com"
             },
-            headers=auth_header(ivan_token)
+            headers=auth_header(user_token)
         )
-        # Сервис не должен падать с 500 из-за подброшенного URL
         assert resp.status_code != 500, (
             f"УЯЗВИМОСТЬ API7: сервис упал при передаче произвольного URL. "
             f"Статус: {resp.status_code}"
@@ -375,7 +469,6 @@ class TestAPI7_SSRF:
 
     def test_internal_service_not_exposed_directly(self):
         """Внутренние сервисы не должны быть доступны напрямую снаружи."""
-        # Попытка обратиться к auth сервису напрямую на порту 8000
         try:
             resp = requests.get("http://localhost:8000/v1/login", timeout=2)
             assert False, (
@@ -390,6 +483,10 @@ class TestAPI7_SSRF:
 # ──────────────────────────────────────────────
 
 class TestAPI8_SecurityMisconfiguration:
+
+    @classmethod
+    def setup_class(cls):
+        time.sleep(65)
 
     def test_x_frame_options_header_present(self):
         """Заголовок X-Frame-Options должен быть в ответе."""
@@ -425,17 +522,14 @@ class TestAPI8_SecurityMisconfiguration:
 
     def test_db_port_not_exposed(self):
         """Порт PostgreSQL 5432 не должен быть доступен снаружи."""
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex(("localhost", 5432))
-            sock.close()
-            assert result != 0, (
-                "УЯЗВИМОСТЬ API8: порт PostgreSQL 5432 открыт снаружи!"
-            )
-        except Exception:
-            pass  # Соединение отклонено — правильно ✅
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(("localhost", 5432))
+        sock.close()
+        assert result != 0, (
+            "УЯЗВИМОСТЬ API8: порт PostgreSQL 5432 открыт снаружи!"
+        )
 
 
 # ──────────────────────────────────────────────
@@ -443,6 +537,10 @@ class TestAPI8_SecurityMisconfiguration:
 # ──────────────────────────────────────────────
 
 class TestAPI9_InventoryManagement:
+
+    @classmethod
+    def setup_class(cls):
+        time.sleep(65)
 
     def test_api_versioning_login(self):
         """Эндпоинт /v1/login должен существовать."""
@@ -484,14 +582,10 @@ class TestAPI9_InventoryManagement:
 
 class TestAPI10_UnsafeAPIConsumption:
 
-    def test_order_service_returns_503_when_user_not_found(self, admin_token):
-        """Order service должен корректно обработать если user не найден."""
-        # Создаём токен для несуществующего user_id=9999
-        from jose import jwt as jose_jwt
-        import os
-        from datetime import datetime, timedelta
-
+    def test_order_service_returns_correct_error_when_user_not_found(self):
+        """Order service должен корректно обработать несуществующего пользователя."""
         secret = os.getenv("SECRET_KEY", "CHANGE_THIS_SUPER_SECRET_KEY_123456")
+        from datetime import datetime, timedelta
         fake_token = jose_jwt.encode(
             {"user_id": 9999, "role": "user", "exp": datetime.utcnow() + timedelta(hours=1)},
             secret,
@@ -502,18 +596,18 @@ class TestAPI10_UnsafeAPIConsumption:
             json={"product": "test"},
             headers=auth_header(fake_token)
         )
-        # Должен вернуть 403 или 503, но не 500
         assert resp.status_code in [403, 503], (
-            f"УЯЗВИМОСТЬ API10: order service вернул неожиданный статус при "
-            f"отсутствии пользователя: {resp.status_code}"
+            f"УЯЗВИМОСТЬ API10: order service вернул неожиданный статус: {resp.status_code}"
         )
 
-    def test_order_service_does_not_crash_on_malformed_response(self, ivan_token):
-        """Order service не должен падать с 500 при любых входных данных."""
+    def test_order_service_does_not_crash_on_long_input(self, tokens):
+        """Order service не должен падать с 500 при длинном input."""
+        user_token = get_token_by_role(tokens, "user")
+
         resp = requests.post(
             ORDER_URL,
-            json={"product": "a" * 10000},  # очень длинная строка
-            headers=auth_header(ivan_token)
+            json={"product": "a" * 10000},
+            headers=auth_header(user_token)
         )
         assert resp.status_code != 500, (
             f"УЯЗВИМОСТЬ API10: сервис упал с 500 при длинном input. "
