@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt, JWTError
@@ -66,7 +67,7 @@ async def rate_limit_and_logging(request: Request, call_next):
     request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
     if len(request_counts[ip]) >= RATE_LIMIT:
         logging.warning(f"Rate limit exceeded for IP {ip}")
-        raise HTTPException(status_code=429, detail="Too many requests")
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
     request_counts[ip].append(now)
     logging.info(f"{request.method} {request.url.path} from {ip}")
     response = await call_next(request)
@@ -126,11 +127,13 @@ def get_order(
 def create_order(
     data: OrderCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    creds: HTTPAuthorizationCredentials = Depends(security)
 ):
     try:
         resp = http_requests.get(
             f"{USER_SERVICE_URL}/v1/users/{current_user['id']}",
+            headers={"Authorization": f"Bearer {creds.credentials}"},
             timeout=3
         )
         if resp.status_code != 200:

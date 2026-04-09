@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from jose import jwt, JWTError
 from typing import Optional
 from sqlalchemy import create_engine, select, Column, Integer, String
@@ -61,7 +62,7 @@ async def rate_limit_and_logging(request: Request, call_next):
     request_counts[ip] = [t for t in request_counts[ip] if now - t < WINDOW_SIZE]
     if len(request_counts[ip]) >= RATE_LIMIT:
         logging.warning(f"Rate limit exceeded for IP {ip}")
-        raise HTTPException(status_code=429, detail="Too many requests")
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"})
     request_counts[ip].append(now)
     logging.info(f"{request.method} {request.url.path} from {ip}")
     response = await call_next(request)

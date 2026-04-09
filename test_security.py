@@ -1,10 +1,12 @@
 """
 Автоматические тесты безопасности OWASP API Top 10
-Запуск: pytest test_security.py -v
+Запуск: pytest test_security.py -v -k "not API4 and not API6"
+        pytest test_security.py -v -k " API4 or API6"
+
 Требования: docker-compose up --build + seed.py выполнен
 """
 
-import time
+import time 
 import pytest
 import requests
 
@@ -230,11 +232,12 @@ class TestAPI3_ObjectPropertyAuth:
 
 class TestAPI4_RateLimiting:
 
+    def setup_method(self):
+        """Пауза перед каждым тестом чтобы сбросить rate limit окно."""
+        time.sleep(65)  # ждём полный сброс окна (WINDOW_SIZE = 60 сек)
+
     def test_rate_limit_triggers_after_limit(self):
         """После 10 запросов должен вернуться 429."""
-        # Сбрасываем счётчик — ждём новое окно
-        time.sleep(2)
-
         status_codes = []
         for _ in range(15):
             resp = requests.post(
@@ -242,6 +245,7 @@ class TestAPI4_RateLimiting:
                 json={"username": "nonexistent", "password": "wrong"}
             )
             status_codes.append(resp.status_code)
+            time.sleep(0.3)  # небольшая пауза между запросами
 
         assert 429 in status_codes, (
             f"УЯЗВИМОСТЬ API4: rate limiting не сработал. "
@@ -250,7 +254,6 @@ class TestAPI4_RateLimiting:
 
     def test_rate_limit_returns_correct_status(self):
         """Rate limit должен возвращать именно 429, не 500."""
-        time.sleep(2)
         last_status = None
         for _ in range(15):
             resp = requests.post(
@@ -258,11 +261,11 @@ class TestAPI4_RateLimiting:
                 json={"username": "nonexistent", "password": "wrong"}
             )
             last_status = resp.status_code
+            time.sleep(0.3)
 
         assert last_status == 429, (
             f"Ожидался статус 429, получен: {last_status}"
         )
-
 
 # ──────────────────────────────────────────────
 # API5 — Broken Function Level Authorization (RBAC)
@@ -307,27 +310,29 @@ class TestAPI5_RBAC:
 
 class TestAPI6_BusinessFlows:
 
+    def setup_method(self):
+        """Пауза перед каждым тестом чтобы сбросить rate limit окно."""
+        time.sleep(65)
+
     def test_brute_force_login_blocked_by_rate_limit(self):
         """Автоматический перебор паролей должен блокироваться rate limiting."""
-        time.sleep(2)
         blocked = False
         for _ in range(15):
             resp = requests.post(
                 AUTH_URL,
                 json={"username": "ivan", "password": "wrongpassword"}
             )
+            time.sleep(0.3)
             if resp.status_code == 429:
                 blocked = True
                 break
 
         assert blocked, (
-            "УЯЗВИМОСТЬ API6: brute force на /login не блокируется. "
-            "Rate limiting не сработал за 15 попыток."
+            "УЯЗВИМОСТЬ API6: brute force на /login не блокируется."
         )
 
     def test_mass_order_creation_blocked(self, ivan_token):
         """Массовое создание заказов должно блокироваться rate limiting."""
-        time.sleep(2)
         blocked = False
         for _ in range(15):
             resp = requests.post(
@@ -335,6 +340,7 @@ class TestAPI6_BusinessFlows:
                 json={"product": "spam_product"},
                 headers=auth_header(ivan_token)
             )
+            time.sleep(0.3)
             if resp.status_code == 429:
                 blocked = True
                 break
