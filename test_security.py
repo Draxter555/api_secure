@@ -43,7 +43,7 @@ def get_token_with_retry(username: str, password: str) -> str:
         if token is not None:
             return token
         print(f"[{username}] Попытка {attempt+1}: ждём сброса rate limit...")
-        time.sleep(65)
+        time.sleep(12)
     assert False, f"Не удалось получить токен для {username} после 5 попыток."
 
 
@@ -308,11 +308,11 @@ class TestAPI4_RateLimiting:
     @classmethod
     def setup_class(cls):
         """Пауза перед классом чтобы сбросить rate limit."""
-        time.sleep(65)
+        time.sleep(12)
 
     def setup_method(self):
         """Пауза перед каждым тестом."""
-        time.sleep(65)
+        time.sleep(12)
 
     def test_rate_limit_triggers_after_limit(self):
         """После 10 запросов должен вернуться 429."""
@@ -354,7 +354,7 @@ class TestAPI5_RBAC:
 
     @classmethod
     def setup_class(cls):
-        time.sleep(65)
+        time.sleep(12)
 
     def test_regular_user_cannot_access_other_users_data(self, tokens):
         """Обычный пользователь не может смотреть данные других."""
@@ -401,10 +401,10 @@ class TestAPI6_BusinessFlows:
 
     @classmethod
     def setup_class(cls):
-        time.sleep(65)
+        time.sleep(12)
 
     def setup_method(self):
-        time.sleep(65)
+        time.sleep(12)
 
     def test_brute_force_login_blocked_by_rate_limit(self):
         """Автоматический перебор паролей должен блокироваться rate limiting."""
@@ -486,7 +486,7 @@ class TestAPI8_SecurityMisconfiguration:
 
     @classmethod
     def setup_class(cls):
-        time.sleep(65)
+        time.sleep(12)
 
     def test_x_frame_options_header_present(self):
         """Заголовок X-Frame-Options должен быть в ответе."""
@@ -540,7 +540,7 @@ class TestAPI9_InventoryManagement:
 
     @classmethod
     def setup_class(cls):
-        time.sleep(65)
+        time.sleep(12)
 
     def test_api_versioning_login(self):
         """Эндпоинт /v1/login должен существовать."""

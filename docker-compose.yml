@@ -27,6 +27,7 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
+      - RATE_WINDOW=${RATE_WINDOW:-60}
     command: uvicorn auth_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
@@ -48,6 +49,7 @@ services:
       - DB_PORT=5432
       - DB_SSLMODE=disable
       - RATE_LIMIT=30
+      - RATE_WINDOW=${RATE_WINDOW:-60}
     command: uvicorn user_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
@@ -69,6 +71,7 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_SSLMODE=disable
+      - RATE_WINDOW=${RATE_WINDOW:-60}
     command: uvicorn order_service.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
